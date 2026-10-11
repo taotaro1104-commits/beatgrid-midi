@@ -2,6 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   beatsToTempoMap,
+  cleanBeats,
+  normalizeVelocities,
   constantTempoMap,
   secondsToTicks,
   ticksToSeconds,
@@ -76,7 +78,7 @@ test("3/4 with the first beat at time zero", () => {
 
 test("seconds <-> ticks round-trips", () => {
   const map = beatsToTempoMap([0.2, 0.7, 1.15, 1.7, 2.2, 2.65]);
-  for (const s of [0, 0.1, 0.5, 1.0, 2.0, 3.5]) {
+  for (const s of [0.2, 0.5, 1.0, 2.0, 3.5]) {
     assert.ok(approx(ticksToSeconds(map, secondsToTicks(map, s)), s, 1e-9));
   }
 });
@@ -186,4 +188,76 @@ test("drums on channel 10 and long delta times encode correctly", () => {
   const on = parseMidi(bytes).tracks[1].find((e) => e.status === 0x90);
   assert.equal(on.channel, 9);
   assert.equal(on.tick, 200000);
+});
+
+test("a first beat within half a beat of the start gets no lead-in (no absurd intro tempo)", () => {
+  const map = beatsToTempoMap(steadyBeats(120, 8, 0.1)); // first beat at 0.1 s, 0.5 s per beat
+  assert.equal(map.firstBeatTick, 0);
+  assert.equal(map.events.length, 1);
+  assert.equal(map.events[0].usPerQuarter, 500000);
+  assert.equal(secondsToTicks(map, 0.05), 0); // before the first beat clamps to tick 0
+  assert.ok(approx(ticksToSeconds(map, 0), 0.1));
+  assert.ok(approx(secondsToTicks(map, 0.6), 480));
+});
+
+test("lead-in length is not thrown off by an odd first interval", () => {
+  const beats = [1.0, 1.2, 1.7, 2.2, 2.7, 3.2]; // first gap is 0.2 s, the rest 0.5 s
+  const map = beatsToTempoMap(beats);
+  assert.equal(map.firstBeatTick, 2 * 480);
+  assert.ok(approx(map.medianBpm, 120));
+});
+
+test("medianBpm reports the typical tempo", () => {
+  assert.ok(approx(beatsToTempoMap(steadyBeats(96, 10)).medianBpm, 96));
+  assert.equal(constantTempoMap(140).medianBpm, 140);
+});
+
+test("cleanBeats sorts, dedupes and drops false detections without mutating", () => {
+  const raw = [1.0, 0.5, Number.NaN, -1, 0.0, 0.5004, 1.2, 1.5, 2.0];
+  const copy = [...raw];
+  const cleaned = cleanBeats(raw);
+  assert.deepEqual(raw.map(String), copy.map(String));
+  // 0.5004 is a duplicate of 0.5; 1.2 is only 0.2 s after 1.0 (under half the 0.5 s median).
+  assert.deepEqual(cleaned, [0, 0.5, 1.0, 1.5, 2.0]);
+});
+
+test("clean option accepts raw beat-tracker output; strict mode still throws", () => {
+  const raw = [1.5, 0.0, 0.5, 0.5, 1.0, 2.0];
+  assert.throws(() => beatsToTempoMap(raw), RangeError);
+  const map = beatsToTempoMap(raw, { clean: true });
+  assert.equal(map.events.length, 1);
+  assert.equal(map.events[0].usPerQuarter, 500000);
+  // Too few beats survive cleaning: still an error (use constantTempoMap instead).
+  assert.throws(() => beatsToTempoMap([Number.NaN, 1], { clean: true }), RangeError);
+});
+
+test("normalizeVelocities stretches to 40..120 and does not mutate", () => {
+  const notes = [
+    { pitch: 60, startTick: 0, endTick: 10, velocity: 50 },
+    { pitch: 62, startTick: 0, endTick: 10, velocity: 60 },
+    { pitch: 64, startTick: 0, endTick: 10, velocity: 70 },
+  ];
+  assert.deepEqual(normalizeVelocities(notes).map((n) => n.velocity), [40, 80, 120]);
+  assert.equal(notes[0].velocity, 50);
+  assert.deepEqual(normalizeVelocities([notes[0], notes[0]]).map((n) => n.velocity), [100, 100]);
+  assert.deepEqual(normalizeVelocities([]), []);
+});
+
+test("writeMidi clamps out-of-range pitch/velocity instead of wrapping to Note Off", () => {
+  const map = constantTempoMap(120);
+  const bytes = writeMidi(map, [
+    { notes: [{ pitch: 200, startTick: 0, endTick: 100, velocity: 128 }, { pitch: 61, startTick: 0, endTick: 100, velocity: 0 }] },
+  ]);
+  const ons = parseMidi(bytes).tracks[1].filter((e) => e.status === 0x90);
+  assert.deepEqual(ons.map((e) => e.data).sort((a, b) => a[0] - b[0]), [[61, 1], [127, 127]]);
+  assert.throws(() => writeMidi(map, [{ notes: [{ pitch: 60, startTick: 0, endTick: 10, velocity: Number.NaN }] }]), RangeError);
+});
+
+test("same pitch starting on the same tick: the later note replaces the earlier one", () => {
+  const map = constantTempoMap(120);
+  const bytes = writeMidi(map, [
+    { notes: [{ pitch: 60, startTick: 0, endTick: 240, velocity: 60 }, { pitch: 60, startTick: 0, endTick: 480, velocity: 100 }] },
+  ]);
+  const ev = parseMidi(bytes).tracks[1].filter((e) => e.kind === "channel");
+  assert.deepEqual(ev.map((e) => [e.tick, e.status, e.data[1]]), [[0, 0x90, 100], [480, 0x80, 0]]);
 });

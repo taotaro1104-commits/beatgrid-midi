@@ -39,10 +39,10 @@
   "homepage": "https://midi.newlife-startup.com/en/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/beatgrid-midi.git"
+    "url": "git+https://github.com/taotaro1104-commits/beatgrid-midi.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/beatgrid-midi/issues"
+    "url": "https://github.com/taotaro1104-commits/beatgrid-midi/issues"
   },
   "license": "MIT",
   "author": "newlife-startup (https://newlife-startup.com/)",

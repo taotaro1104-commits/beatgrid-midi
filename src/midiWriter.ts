@@ -52,27 +52,39 @@ function noteTrack(track: MidiTrack): Uint8Array {
 
   const evs: Ev[] = [];
   if (track.name) evs.push({ tick: 0, order: 0, bytes: meta(0x03, utf8(track.name)) });
-  if (track.program !== undefined) evs.push({ tick: 0, order: 1, bytes: [0xc0 | ch, track.program & 0x7f] });
+  if (track.program !== undefined) evs.push({ tick: 0, order: 1, bytes: [0xc0 | ch, dataByte(track.program, 0, "program")] });
 
   // On one channel, a repeated pitch must be released before it sounds again,
-  // otherwise the earlier Note Off would cut the later note short.
+  // otherwise the earlier Note Off would cut the later note short. A note that
+  // starts at the same tick as the next one of its pitch is replaced by it.
   const notes = [...track.notes].sort((a, b) => a.startTick - b.startTick);
-  const lastByPitch = new Map<number, { endTick: number; startTick: number }>();
-  const trimmed: Array<{ pitch: number; startTick: number; endTick: number; velocity: number }> = [];
+  const lastByPitch = new Map<number, { endTick: number; startTick: number; dropped: boolean }>();
+  const trimmed: Array<{ pitch: number; startTick: number; endTick: number; velocity: number; dropped: boolean }> = [];
   for (const n of notes) {
     const prev = lastByPitch.get(n.pitch);
-    if (prev && prev.endTick > n.startTick) prev.endTick = Math.max(prev.startTick + 1, n.startTick);
-    const copy = { ...n };
+    if (prev && prev.endTick > n.startTick) {
+      if (n.startTick > prev.startTick) prev.endTick = n.startTick;
+      else prev.dropped = true;
+    }
+    const copy = { ...n, dropped: false };
     trimmed.push(copy);
     lastByPitch.set(n.pitch, copy);
   }
   for (const n of trimmed) {
-    if (n.endTick <= n.startTick) continue;
+    if (n.dropped || n.endTick <= n.startTick) continue;
+    const pitch = dataByte(n.pitch, 0, "pitch");
+    const velocity = dataByte(n.velocity, 1, "velocity");
     // Note Off (order 2) sorts before Note On (order 3) at the same tick.
-    evs.push({ tick: n.startTick, order: 3, bytes: [0x90 | ch, n.pitch & 0x7f, n.velocity & 0x7f] });
-    evs.push({ tick: n.endTick, order: 2, bytes: [0x80 | ch, n.pitch & 0x7f, 0] });
+    evs.push({ tick: n.startTick, order: 3, bytes: [0x90 | ch, pitch, velocity] });
+    evs.push({ tick: n.endTick, order: 2, bytes: [0x80 | ch, pitch, 0] });
   }
   return trackChunk(evs);
+}
+
+/** A MIDI data byte: out-of-range values are clamped to `min`..127 (velocity 0 would mean Note Off). */
+function dataByte(value: number, min: number, what: string): number {
+  if (!Number.isFinite(value)) throw new RangeError(`${what} must be a finite number`);
+  return Math.min(127, Math.max(min, Math.trunc(value)));
 }
 
 function trackChunk(evs: Ev[]): Uint8Array {

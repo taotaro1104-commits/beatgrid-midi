@@ -94,12 +94,13 @@ await new BasicPitch(modelUrl).evaluateModel(audio22k, (f, o, c) => {
 }, () => {});
 const events = noteFramesToTime(addPitchBendsToNoteEvents(contours, outputToNotesPoly(frames, onsets, 0.25, 0.25, 5)));
 
-const map = beatsToTempoMap(beats); // beats from your beat tracker
+const map = beatsToTempoMap(beats, { clean: true }); // beats from your beat tracker
 const midi = writeMidi(map, [{ name: "Transcription", notes: quantizeNotes(fromBasicPitch(events), map) }]);
 ```
 
 > **Beat detection is not included.** beatgrid-midi starts from beat times.
 > Use the beat tracker of your choice (a DSP onset/tempo tracker, an ML model, or taps from the user).
+> Raw tracker output can contain duplicates or false beats — pass `{ clean: true }` (see below).
 
 ## Run the example
 
@@ -121,12 +122,20 @@ Drop both files into your DAW and look at the bar lines.
 | `ppq` | `480` | Ticks per quarter note |
 | `beatsPerBar` | `4` | Time signature numerator (denominator is 4) |
 | `downbeatIndex` | `0` | Index of a beat that should start a bar. If needed, a short **pickup bar** (e.g. 2/4 before 4/4) is inserted at the start so this beat — and every `beatsPerBar`-th beat after it — falls on a bar line |
+| `clean` | `false` | Run `cleanBeats()` first, so raw beat-tracker output is accepted instead of throwing |
 
-`beats` must be strictly increasing, in seconds, with at least two entries.
-Silence before the first beat becomes a lead-in at roughly the opening tempo.
+Without `clean`, `beats` must be strictly increasing, in seconds, with at least two entries (otherwise a `RangeError`).
+Silence before the first beat becomes a lead-in at roughly the typical tempo; a first beat within half a beat of the start sits on tick 0.
 Consecutive identical tempos are merged.
 
-Returns `{ ppq, events, timeSignatures, firstBeatTick }`; each event has `tick`, `usPerQuarter`, `bpm` and `seconds`.
+Returns `{ ppq, events, timeSignatures, firstBeatTick, medianBpm }`; each event has `tick`, `usPerQuarter`, `bpm` and `seconds`.
+`medianBpm` is the typical tempo of the performance (median beat interval) — use it for display.
+
+### `cleanBeats(beats) → number[]`
+
+Tidies raw beat-tracker output: drops non-finite and negative values, sorts, removes duplicates closer
+than 1 ms, then removes beats closer than half the median beat interval (false detections).
+If fewer than two beats survive, use `constantTempoMap` instead.
 
 ### `constantTempoMap(bpm, ppq?, beatsPerBar?) → TempoMap`
 
@@ -147,6 +156,12 @@ Convert positions using the map (fractional ticks; exact inverses of each other)
 
 Input notes: `{ pitch, start, end, velocity? | amplitude? }` (seconds; `amplitude` 0–1 maps to velocity).
 
+### `normalizeVelocities(notes, low?, high?) → notes`
+
+Stretches velocities linearly to `low`..`high` (default 40..120; all notes get 100 if they share one
+velocity). Model amplitudes cluster in a narrow range, so this makes dynamics audible. Not applied
+automatically — call it on the result of `quantizeNotes`.
+
 ### `fromBasicPitch(events) → TimedNote[]`
 
 Adapter for Basic Pitch's `{ startTimeSeconds, durationSeconds, pitchMidi, amplitude }`.
@@ -156,7 +171,9 @@ Adapter for Basic Pitch's `{ startTimeSeconds, durationSeconds, pitchMidi, ampli
 Writes **SMF Type 1**: track 0 holds the tempo map and time signatures, then one track per entry of
 `tracks` (`{ name?, channel?, program?, notes }`; use `channel: 9` for GM drums).
 Note Offs are written before Note Ons at the same tick, and overlapping repeats of the same pitch are
-trimmed so a later note is never cut short by an earlier Note Off.
+trimmed so a later note is never cut short by an earlier Note Off (a note that starts on the same tick
+as the next note of its pitch is replaced by it). Pitch and velocity are clamped to 0–127 and 1–127;
+`NaN` throws a `RangeError`.
 
 ---
 
@@ -164,7 +181,7 @@ trimmed so a later note is never cut short by an earlier Note Off.
 
 1. **One beat = one quarter note.** For each interval between detected beats *i* and *i+1*, a Set Tempo
    event is written at tick `i × ppq` with `usPerQuarter = (beat[i+1] − beat[i]) × 10⁶`.
-2. **Lead-in.** Time before the first beat is filled with `round(firstBeat / firstInterval)` quarters at
+2. **Lead-in.** Time before the first beat is filled with `round(firstBeat / medianInterval)` quarters at
    a matching tempo, so the file doesn't open with an absurd tempo.
 3. **Bar alignment.** If the chosen downbeat wouldn't land on a bar line, the first bar is shortened
    into a pickup — the same way a score notates an anacrusis.
@@ -173,6 +190,19 @@ trimmed so a later note is never cut short by an earlier Note Off.
 
 Tempo is stored in whole microseconds (as the MIDI format requires), so rounding adds at most 0.5 µs
 per beat — under one tick (at 480 ppq) even across a 10-minute song.
+
+---
+
+## Relation to the Audio to MIDI site
+
+This is the method the [Audio to MIDI](https://midi.newlife-startup.com/en/) site uses, and with
+`clean: true` the tempo events match the site's output beat for beat. Differences to know about:
+
+- **Time signature.** The site always writes 4/4 from tick 0. This library can insert a pickup bar
+  (`downbeatIndex`) so a chosen beat lands on a bar line, which moves the bar lines compared with the site.
+- **Velocity.** The site stretches velocities with `normalizeVelocities` (40–120). Here it is opt-in.
+- **Input checking.** The site silently falls back to 120 BPM when beats are missing; this library throws
+  unless you pass `clean: true`, and requires `constantTempoMap` for the no-beats case.
 
 ---
 

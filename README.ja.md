@@ -92,12 +92,13 @@ await new BasicPitch(modelUrl).evaluateModel(audio22k, (f, o, c) => {
 }, () => {});
 const events = noteFramesToTime(addPitchBendsToNoteEvents(contours, outputToNotesPoly(frames, onsets, 0.25, 0.25, 5)));
 
-const map = beatsToTempoMap(beats); // ビートトラッカーの出力
+const map = beatsToTempoMap(beats, { clean: true }); // ビートトラッカーの出力
 const midi = writeMidi(map, [{ name: "Transcription", notes: quantizeNotes(fromBasicPitch(events), map) }]);
 ```
 
 > **ビート検出は含まれていません。** beatgrid-midi はビート位置を入力として受け取ります。
 > ビート検出には、DSPのオンセット／テンポ検出、機械学習モデル、ユーザーのタップ入力など、好きな方法を使ってください。
+> トラッカーの出力そのままには重複や誤検出が含まれることがあるため、`{ clean: true }` を渡してください（下記参照）。
 
 ## サンプルを動かす
 
@@ -119,11 +120,19 @@ npm run example   # examples/out/fixed-120.mid と examples/out/beatgrid.mid を
 | `ppq` | `480` | 4分音符あたりのティック数 |
 | `beatsPerBar` | `4` | 拍子の分子（分母は4） |
 | `downbeatIndex` | `0` | 小節の頭にしたいビートの番号。必要に応じて冒頭に短い **弱起の小節**（4/4の前の2/4など）を入れ、このビートと、そこから `beatsPerBar` 拍ごとのビートが小節線上に来るようにします |
+| `clean` | `false` | 先に `cleanBeats()` を実行します。ビートトラッカーの出力をそのまま渡しても例外になりません |
 
-`beats` は秒単位で狭義単調増加、2個以上が必要です。
-最初のビートより前の無音は、冒頭のテンポに近いテンポのリードインになります。同じテンポが続く場合はまとめられます。
+`clean` を使わない場合、`beats` は秒単位で狭義単調増加、2個以上が必要です（満たさないと `RangeError`）。
+最初のビートより前の無音は、典型的なテンポに近いテンポのリードインになります。最初のビートが開始から半拍以内なら、そのビートを tick 0 に置きます。
+同じテンポが続く場合はまとめられます。
 
-戻り値は `{ ppq, events, timeSignatures, firstBeatTick }` で、各イベントは `tick`・`usPerQuarter`・`bpm`・`seconds` を持ちます。
+戻り値は `{ ppq, events, timeSignatures, firstBeatTick, medianBpm }` で、各イベントは `tick`・`usPerQuarter`・`bpm`・`seconds` を持ちます。
+`medianBpm` は演奏の代表テンポ（拍間隔の中央値）で、表示に使えます。
+
+### `cleanBeats(beats) → number[]`
+
+ビートトラッカーの生の出力を整えます。非有限値と負の値を捨て、並べ替え、1ms未満の重複を除き、
+拍間隔の中央値の半分より近いビート（誤検出）を取り除きます。2個未満になった場合は `constantTempoMap` を使ってください。
 
 ### `constantTempoMap(bpm, ppq?, beatsPerBar?) → TempoMap`
 
@@ -144,6 +153,11 @@ npm run example   # examples/out/fixed-120.mid と examples/out/beatgrid.mid を
 
 入力ノート：`{ pitch, start, end, velocity? | amplitude? }`（秒。`amplitude` 0〜1 はベロシティに変換されます）
 
+### `normalizeVelocities(notes, low?, high?) → notes`
+
+ベロシティを `low`〜`high`（既定 40〜120）に線形に引き伸ばします（全ノートが同じ値なら 100）。
+モデルの出力するamplitudeは狭い範囲に集まるため、強弱が聞こえるようにする処理です。自動では適用されないので、`quantizeNotes` の結果に対して呼んでください。
+
 ### `fromBasicPitch(events) → TimedNote[]`
 
 Basic Pitch の `{ startTimeSeconds, durationSeconds, pitchMidi, amplitude }` を変換するアダプタです。
@@ -153,7 +167,8 @@ Basic Pitch の `{ startTimeSeconds, durationSeconds, pitchMidi, amplitude }` �
 **SMF Type 1** を書き出します。トラック0にテンポマップと拍子、続いて `tracks` の各要素が1トラックずつ入ります
 （`{ name?, channel?, program?, notes }`。GMドラムは `channel: 9`）。
 同じティックではノートオフをノートオンより先に書き、同じ音程が重なった場合は前のノートを短くして、
-後のノートが前のノートオフで切れないようにしています。
+後のノートが前のノートオフで切れないようにしています（同じ音程で同じティックに始まる場合は、後のノートが前のノートを置き換えます）。
+ピッチは0〜127、ベロシティは1〜127に丸められ、`NaN` は `RangeError` になります。
 
 ---
 
@@ -161,13 +176,23 @@ Basic Pitch の `{ startTimeSeconds, durationSeconds, pitchMidi, amplitude }` �
 
 1. **1ビート＝4分音符1つ。** 検出したビート *i* と *i+1* の間ごとに、ティック `i × ppq` の位置へ
    `usPerQuarter = (beat[i+1] − beat[i]) × 10⁶` のテンポイベントを書きます。
-2. **リードイン。** 最初のビートまでの時間は、`round(最初のビート時刻 / 最初の間隔)` 個の4分音符で埋め、
+2. **リードイン。** 最初のビートまでの時間は、`round(最初のビート時刻 / 拍間隔の中央値)` 個の4分音符で埋め、
    冒頭が極端なテンポにならないようにします。
 3. **小節合わせ。** 指定したダウンビートが小節線に来ない場合は、楽譜の弱起（アウフタクト）と同じように最初の小節を短くします。
 4. **秒ではなくティックでクオンタイズ。** ノートをマップでティックに変換してからスナップするので、グリッドが演奏に合わせて伸び縮みします。
 
 テンポはMIDIの仕様どおり整数マイクロ秒で保存するため、丸め誤差は1ビートあたり最大0.5µsです。
 10分の曲でも合計1ティック（480 ppq時）未満に収まります。
+
+---
+
+## Audio to MIDI サイトとの関係
+
+[Audio to MIDI](https://midi.newlife-startup.com/) サイトと同じ手法で、`clean: true` ならテンポイベントがサイトの出力とビートごとに一致します。違いは次の点です。
+
+- **拍子記号**: サイトは常に tick 0 から 4/4 です。このライブラリは弱起の小節（`downbeatIndex`）を入れて、指定したビートを小節線に合わせられます。その場合、サイトとは小節線の位置が変わります。
+- **ベロシティ**: サイトは `normalizeVelocities`（40〜120）で強弱を引き伸ばします。こちらは任意です。
+- **入力チェック**: サイトはビートが足りないとき黙って 120 BPM に切り替えます。このライブラリは `clean: true` を渡さない限り例外を投げ、ビートが無い場合は `constantTempoMap` を使う必要があります。
 
 ---
 

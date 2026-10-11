@@ -1,5 +1,6 @@
 export {
   beatsToTempoMap,
+  cleanBeats,
   constantTempoMap,
   secondsToTicks,
   ticksToSeconds,
@@ -10,6 +11,7 @@ export {
 } from "./tempoMap.js";
 export {
   quantizeNotes,
+  normalizeVelocities,
   fromBasicPitch,
   type BasicPitchNoteEvent,
   type QuantizeOptions,

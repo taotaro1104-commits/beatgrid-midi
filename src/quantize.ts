@@ -107,3 +107,22 @@ export function fromBasicPitch(events: readonly BasicPitchNoteEvent[]): TimedNot
     amplitude: e.amplitude,
   }));
 }
+
+/**
+ * Stretch velocities linearly so the quietest note becomes `low` and the
+ * loudest `high` (all notes get 100 when they share one velocity). Model
+ * amplitudes cluster in a narrow range, so this makes dynamics audible.
+ * Returns new notes; the input is not modified.
+ */
+export function normalizeVelocities<T extends { velocity: number }>(notes: readonly T[], low = 40, high = 120): T[] {
+  if (notes.length === 0) return [];
+  let vmin = Infinity;
+  let vmax = -Infinity;
+  for (const n of notes) {
+    vmin = Math.min(vmin, n.velocity);
+    vmax = Math.max(vmax, n.velocity);
+  }
+  if (vmax === vmin) return notes.map((n) => ({ ...n, velocity: 100 }));
+  const scale = (high - low) / (vmax - vmin);
+  return notes.map((n) => ({ ...n, velocity: clampVelocity(low + (n.velocity - vmin) * scale) }));
+}
